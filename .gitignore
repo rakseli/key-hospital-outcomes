@@ -1,2 +1,4 @@
 plots/
 data/
+__pycache__/
+scripts/
