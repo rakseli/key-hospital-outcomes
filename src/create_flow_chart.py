@@ -1,55 +1,15 @@
-# Source 27481 patients with 156 columns
-#1. Set binary categorical variables to 0 or 1
-#2. Set ordinal categorical variables to start from 0 and combine the given binary columns to ordinal
-    #True ordinal columns: urbanization_degree, patient_education, severity_of_illness,risk_of_mortality, country_income_category
-#3. Remove 67 unecessary columns resulting of dataset with 90 columns
-    # individaul unit LOS columns
-    # BMI
-    # distict inpatient units
-    # all text descriptors of units, codes or processes
-    # number of transfers
-    # columns containing a constant value
-    # the discharging unit
-#4. Replace missing values with mode or median and add binary column is_missing indicating if value was missing
-    # majority of missing categorical <10% missing but for education 38%
-    # For categorical variables:
-    # urbanization_degree
-    # patient_education
-    # patient_marital_status
-    # patient_social_status
-    # patient_employment
-    # For numerical:
-        #weight
-        #height
-        #additionally replace malformed values as missing
-        #weight <20 or >600 and height <55 or 272>
-        #<5% of values missing or malforded
-#5. Drop one patient with multiple missing values.
-    # including the patient would have created several columns "is_missing" where 
-    # the patient would have been only with value 1
-    
-#6. Encode all true categorical variables as binary and remove source columns
-    # medical processes, 1740 new columns
-    # icd diagnoses, 3692 new columns
-    # Major Diagnostic categories, 24 new columns
-    # DRG Codes, 432 new columns
-    # Residence, 7 nrw columns
-    # Marital status, 7 new columns
-    # Social status, 6 new
-    # Patient occupatione, 5 new
-    # Patient employment, 6 new
-#7. Create columns for process counts, icd diagnose counts, and nursing diagnose counts
-
-#8. Replace malforded nursing diagnose binary variables with 0
-#9. Final dataset with 27480 patients and 5997 features, the target (LOS), and baseline prediction and id which were not used for prediction
-
 """Draw the data preprocessing flowchart with Graphviz.
+
+Layout: the main column holds the processing steps and dataset states; details
+sit in side notes linked to their step by a dashed line.
 
 Accessibility choices (OUP "Making Figures Accessible" v2):
   - Black text and lines on white / very light grey (contrast well above WCAG AA)
-  - No information carried by colour: dataset states are rounded, double-bordered
-    boxes; processing steps are plain rectangles
-  - Sans-serif font at 12 pt, horizontal text, step details flush left
+  - No information carried by colour. Element types differ by shape and line:
+      dataset state  -> rounded box, double border, light grey fill
+      processing step -> plain rectangle, solid border
+      side note      -> folded-corner note, dashed border, dashed connector
+  - Sans-serif font at 12 pt throughout, horizontal text, flush-left blocks
   - Thick lines, solid arrowheads, single top-to-bottom reading order
 
 Requires the Graphviz system binaries and the Python package:
@@ -57,123 +17,244 @@ Requires the Graphviz system binaries and the Python package:
 """
 
 from html import escape
-
+import os
 import graphviz
 
 FONT = "Arial"
 FONT_SIZE = "12"
 LINE_WIDTH = "1.5"
 STATE_FILL = "#F2F2F2"
-TEXT_WIDTH = 500  # width in points of the text block inside step boxes
+STEP_WIDTH = 270
+STEP_BOX_IN = "4.0"  # outer width (inches) of main-column boxes
+NOTE_BOX_IN = "4.4"  # outer width (inches) of side notes  # text-block width (points) in step boxes
+NOTE_WIDTH = 300  # text-block width (points) in side notes
 
-# Each entry is either a dataset state or a processing step.
-# ("state", heading or None, [lines]) or ("step", heading, [lines])
+
+# ---------------------------------------------------------------------------
+# Content
+# ---------------------------------------------------------------------------
+# Each item: kind ("state" or "step"), heading, body lines, optional side note.
+# A side note is either a list of text lines or a ready-made HTML table string.
+
+def table(header, rows, col_align=None, gap=14):
+    """Small ruled table for use inside a side note."""
+    col_align = col_align or ["LEFT"] * len(header)
+    spacer_h = f'<TD SIDES="B" BORDER="1" WIDTH="{gap}"></TD>'
+    spacer = f'<TD WIDTH="{gap}"></TD>'
+    head = spacer_h.join(
+        f'<TD ALIGN="{a}" SIDES="B" BORDER="1" CELLPADDING="2"><B>{escape(h)}</B></TD>'
+        for h, a in zip(header, col_align)
+    )
+    body = "".join(
+        "<TR>" + spacer.join(
+            f'<TD ALIGN="{a}" BALIGN="LEFT">{c}</TD>' for c, a in zip(r, col_align)
+        ) + "</TR>"
+        for r in rows
+    )
+    return (
+        '<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="1" CELLSPACING="0">'
+        f"<TR>{head}</TR>{body}</TABLE>"
+    )
+
+
+MISSING_TABLE = table(
+    ["Variable", "Imputation", "Missing"],
+    [
+        ["Urbanization degree", "Mode", "&lt; 10%"],
+        ["Educational level", "Mode", "38%"],
+        ["Marital status", "Mode", "&lt; 10%"],
+        ["Social status", "Mode", "&lt; 10%"],
+        ["Employment status", "Mode", "&lt; 10%"],
+        ["Weight<SUP>a</SUP>", "Median", "&lt; 5%"],
+        ["Height<SUP>a</SUP>", "Median", "&lt; 5%"],
+    ],
+    ["LEFT", "LEFT", "RIGHT"],
+)
+MISSING_NOTE = (
+    '<TABLE BORDER="0" CELLPADDING="0" CELLSPACING="4">'
+    f'<TR><TD ALIGN="LEFT">{MISSING_TABLE}</TD></TR>'
+    '<TR><TD ALIGN="LEFT" BALIGN="LEFT"><SUP>a</SUP> Implausible values (weight &lt; 20 or'
+    '<BR/>&gt; 600 kg; height &lt; 55 or &gt; 272 cm) recoded'
+    '<BR/>as missing before imputation</TD></TR></TABLE>'
+)
+
+ENCODING_TABLE = table(
+    ["Variable", "Indicators"],
+    [
+        ["Medical procedures", "1740"],
+        ["ICD diagnoses", "3692"],
+        ["Diagnosis-related groups", "432"],
+        ["Major diagnostic categories", "24"],
+        ["Discharge", "7"],
+        ["Marital status", "7"],
+        ["Social status", "6"],
+        ["Employment status", "6"],
+        ["Occupation", "5"],
+    ],
+    ["LEFT", "RIGHT"],
+)
+
 FLOW = [
-    ("state", "Source dataset", ["27 481 patients, 156 columns"]),
-    ("step", "1. Binary categorical variables", ["Coded as 0 or 1"]),
-    ("step", "2. Ordinal categorical variables", [
-        "Recoded to start from 0; related binary columns combined into ordinal variables",
-        "(urbanization degree, education, severity of illness, risk of mortality,",
-        "country income category)",
+    ("state", "Source dataset", ["27 481 patients; 156 variables"], None),
+    ("step", "1. Binary encoding", ["Dichotomous variables coded as 0/1"], None),
+    ("step", "2. Ordinal encoding", [
+        "Ordinal variables recoded as integers",
+        "from 0; related indicator columns merged",
+    ], [
+        "Urbanization degree, educational level,",
+        "severity of illness, risk of mortality,",
+        "country income category",
     ]),
-    ("step", "3. Removal of 67 unnecessary columns", [
-        "Unit-level length of stay, body mass index, distinct inpatient units,",
-        "text descriptors of units, codes and processes, number of transfers,",
-        "discharging unit, constant-valued columns",
+    ("step", "3. Variable exclusion", ["67 redundant or uninformative", "variables removed"], [
+        "Unit-level lengths of stay; body mass index;",
+        "individual inpatient units; discharging unit;",
+        "number and types of transfers; free-text descriptors",
+        "of units, codes and procedures;",
+        "constant-valued variables",
     ]),
-    ("state", None, ["27 481 patients, 90 columns"]),
-    ("step", "4. Imputation of missing values", [
-        "Categorical (mode): urbanization degree, education, marital status,",
-        "social status, employment; under 10% missing, except education (38%)",
-        "Numerical (median): weight, height; under 5% missing; implausible values",
-        "(weight < 20 or > 600, height < 55 or > 272) set to missing",
-        "Binary missingness indicator added for each imputed variable",
+    ("state", None, ["27 481 patients; 90 variables"], None),
+    ("step", "4. Missing-data imputation", [
+        "Mode (categorical) or median",
+        "(continuous) imputation; binary",
+        "missingness indicator added per variable",
+    ], MISSING_NOTE),
+    ("step", "5. Patient exclusion", ["1 patient with multiple missing", "values excluded"], [
+        "Retaining this patient would have produced",
+        "missingness indicators with a single",
+        "positive case",
     ]),
-    ("step", "5. Exclusion of 1 patient", [
-        "Multiple missing values; inclusion would have created indicator",
-        "columns with this patient as the only positive case",
-    ]),
-    ("step", "6. One-hot encoding of nominal variables (source columns removed)", [
-        "Medical processes 1740 · ICD diagnoses 3692 · DRG codes 432",
-        "Major diagnostic categories 24 · Residence 7 · Marital status 7",
-        "Social status 6 · Employment 6 · Occupation 5",
-    ]),
-    ("step", "7. Count features added", [
-        "Number of processes, ICD diagnoses and nursing diagnoses",
-    ]),
-    ("step", "8. Nursing diagnosis variables", [
-        "Malformed binary values set to 0",
-    ]),
-    ("state", "Final dataset", [
-        "27 480 patients, 5997 features",
-        "plus target (length of stay), baseline prediction and patient ID",
-        "(not used as predictors)",
+    ("step", "6. One-hot encoding", [
+        "Categorical variables converted to binary",
+        "indicators; source variables removed",
+    ], ENCODING_TABLE),
+    ("step", "7. Count feature creation", [
+        "Counts of procedures, ICD diagnoses",
+        "and nursing diagnoses derived",
+    ], None),
+    ("step", "8. Data correction", [
+        "Malformed values in nursing diagnosis",
+        "indicators set to 0",
+    ], None),
+    ("state", "Final dataset", ["27 480 patients; 5998 features"], [
+        "Also retained but not used as predictors:",
+        "outcome (length of stay), baseline",
+        "prediction, patient identifier",
     ]),
 ]
 
 
+# ---------------------------------------------------------------------------
+# Label helpers
+# ---------------------------------------------------------------------------
+
 def html_lines(heading, lines):
-    """Join an optional bold heading and body lines into HTML-label markup."""
     parts = [f"<B>{escape(heading)}</B>"] if heading else []
     parts += [escape(line) for line in lines]
     return "<BR/>".join(parts)
 
 
-def state_label(heading, lines):
-    """Centred label for dataset-state boxes."""
-    return f"<{html_lines(heading, lines)}>"
-
-
-def step_label(heading, lines):
-    """Flush-left label in a fixed-width block so all step boxes align."""
+def block(content, width, align="LEFT"):
+    """Fixed-width text block so boxes of the same type line up."""
     return (
-        f'<<TABLE BORDER="0" CELLPADDING="2" CELLSPACING="0" WIDTH="{TEXT_WIDTH}">'
-        f'<TR><TD ALIGN="LEFT" BALIGN="LEFT">{html_lines(heading, lines)}</TD></TR>'
-        f"</TABLE>>"
+        f'<<TABLE BORDER="0" CELLPADDING="2" CELLSPACING="0" WIDTH="{width}">'
+        f'<TR><TD ALIGN="{align}" BALIGN="{align}">{content}</TD></TR></TABLE>>'
     )
 
+
+def state_block(heading, lines, width):
+    rows = ([f"<B>{escape(heading)}</B>"] if heading else []) + [escape(l) for l in lines]
+    cells = "".join(f'<TR><TD ALIGN="CENTER">{r}</TD></TR>' for r in rows)
+    return (f'<<TABLE BORDER="0" CELLPADDING="1" CELLSPACING="0" WIDTH="{width}">'
+            f"{cells}</TABLE>>")
+
+
+def note_label(note):
+    if isinstance(note, str):  # pre-built HTML (tables)
+        return block(note, NOTE_WIDTH)
+    return block("<BR/>".join(escape(line) for line in note), NOTE_WIDTH)
+
+
+# ---------------------------------------------------------------------------
+# Graph
+# ---------------------------------------------------------------------------
 
 def build_graph():
     g = graphviz.Digraph("preprocessing")
-    g.attr(
-        "graph",
-        rankdir="TB", splines="ortho", nodesep="0.4", ranksep="0.35",
-        bgcolor="white", fontname=FONT, pad="0.2",
-    )
-    g.attr(
-        "node",
-        shape="box", style="filled", fillcolor="white", color="black",
-        penwidth=LINE_WIDTH, fontname=FONT, fontsize=FONT_SIZE,
-        fontcolor="black", margin="0.15,0.08", width="5.2",
-    )
-    g.attr(
-        "edge",
-        color="black", penwidth=LINE_WIDTH, arrowhead="normal", arrowsize="0.9",
-    )
+    g.attr("graph", rankdir="TB", splines="ortho", nodesep="0.45",
+           ranksep="0.3", bgcolor="white", fontname=FONT, pad="0.2",
+           newrank="true")
+    g.attr("node", shape="box", style="filled", fillcolor="white",
+           color="black", penwidth=LINE_WIDTH, fontname=FONT,
+           fontsize=FONT_SIZE, fontcolor="black", margin="0.12,0.07")
+    g.attr("edge", color="black", penwidth=LINE_WIDTH, arrowhead="normal",
+           arrowsize="0.9")
 
-    names = []
-    for i, (kind, heading, lines) in enumerate(FLOW):
+    main = []
+    for i, (kind, heading, lines, note) in enumerate(FLOW):
         name = f"n{i}"
         if kind == "state":
-            g.node(
-                name, label=state_label(heading, lines),
-                style="rounded,filled", peripheries="2", fillcolor=STATE_FILL,
-            )
+            g.node(name, label=f"<{html_lines(heading, lines)}>",
+                   style="rounded,filled", peripheries="2", fillcolor=STATE_FILL,
+                   group="main", width=STEP_BOX_IN, fixedsize="false")
         else:
-            g.node(name, label=step_label(heading, lines))
-        names.append(name)
+            g.node(name, label=block(html_lines(heading, lines), STEP_WIDTH),
+                   group="main", width=STEP_BOX_IN)
+        main.append(name)
 
-    for a, b in zip(names, names[1:]):
-        g.edge(a, b)
+        if note is not None:
+            note_name = f"note{i}"
+            g.node(note_name, label=note_label(note), shape="note",
+                   style="dashed", penwidth="1.2", margin="0.1,0.06",
+                   width=NOTE_BOX_IN, group="notes")
+            with g.subgraph() as s:
+                s.attr(rank="same")
+                s.node(name)
+                s.node(note_name)
+            g.edge(name, note_name, style="dashed", arrowhead="none",
+                   penwidth="1.2")
+
+    for a, b in zip(main, main[1:]):
+        g.edge(a, b, weight="10")
 
     return g
 
 
+def export_print_formats(graph, stem="preprocessing_flow", tiff_dpi=600):
+    """Write EPS and TIFF versions for journal submission.
+ 
+    EPS: converted from the PDF with poppler's pdftops, which embeds the fonts;
+         falls back to Graphviz's own EPS writer if pdftops is not installed.
+    TIFF: rendered as PNG at `tiff_dpi`, saved as LZW-compressed greyscale TIFF
+          with the resolution stored in the file (needs Pillow).
+    """
+    import shutil
+    import subprocess
+ 
+    from PIL import Image
+ 
+    # EPS
+    if shutil.which("pdftops"):
+        subprocess.run(["pdftops", "-eps", f"{stem}.pdf", f"{stem}.eps"], check=True)
+    else:
+        graph.render(stem, format="eps", cleanup=False)
+ 
+    # TIFF
+    hi = graph.copy()
+    hi.attr("graph", dpi=str(tiff_dpi))
+    png_path = hi.render(f"{stem}_{tiff_dpi}dpi", format="png", cleanup=True)
+    with Image.open(png_path) as im:
+        im.convert("L").save(
+            f"{stem}.tiff", compression="tiff_lzw", dpi=(tiff_dpi, tiff_dpi)
+        )
+    os.remove(png_path)
+ 
+ 
 if __name__ == "__main__":
     graph = build_graph()
-    graph.save("preprocessing_flow.dot")  # Graphviz source
-    for fmt in ("pdf", "svg"):  # vector formats for the journal
+    graph.save("preprocessing_flow.dot")
+    for fmt in ("pdf", "svg"):
         graph.render("preprocessing_flow", format=fmt, cleanup=False)
-    graph.attr("graph", dpi="300")  # high-resolution raster for preview/submission
+    export_print_formats(graph)
+    graph.attr("graph", dpi="300")
     graph.render("preprocessing_flow", format="png", cleanup=False)
-    print("Wrote preprocessing_flow.dot, .pdf, .svg and .png")
+    print("Wrote preprocessing_flow .dot, .pdf, .svg, .eps, .tiff and .png")
