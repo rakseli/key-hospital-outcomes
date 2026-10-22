@@ -1,3 +1,4 @@
+[![DOI](https://zenodo.org/badge/1401333011.svg)](https://doi.org/10.5281/zenodo.23564546)
 # key-hospital-outcomes
 
 Code for replicating the analysis in [article]()
