@@ -1,0 +1,78 @@
+Bootstrap: docker
+From: rockylinux/rockylinux:9.6
+
+%labels
+  Author Akseli
+%files
+  requirements.txt /opt/requirements.txt
+%post
+  #############################################################################
+  # Setting versions
+  #############################################################################
+
+  # Versions for basic packages coming from Rocky Linux
+  PYVER=3.12
+  GCC_TOOLSET=14
+
+  export MAKEFLAGS="-j$(nproc)"
+  export MAX_JOBS="$(nproc)"
+
+  echo "HOME=$HOME"
+  export HOME=/root
+
+  #############################################################################
+  # Basic Rocky packages
+  #############################################################################
+
+  # Enable dnf plugins like config-manager
+  dnf install -y dnf-plugins-core
+  dnf config-manager --set-enabled crb
+
+  # Upgrade packages to most recent versions
+  dnf -y upgrade
+
+  # Install additional packages
+  dnf -y install which patch python${PYVER}-devel python${PYVER}-pip git wget libsndfile \
+      ncurses-devel libxkbcommon-x11 \
+      libxml2-devel libxslt-devel unzip \
+      bzip2-devel graphviz sqlite-devel openssl-devel \
+      numactl numactl-devel
+
+  # Packages from EPEL
+  dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+  dnf -y install turbojpeg turbojpeg-devel openblas-devel sparsehash-devel
+
+  # Packages from RPM Fusion
+  dnf install -y https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-9.noarch.rpm
+  dnf -y install ffmpeg
+
+  # Install newer gcc
+  dnf -y install gcc-toolset-${GCC_TOOLSET}
+  source /opt/rh/gcc-toolset-${GCC_TOOLSET}/enable
+  echo "source /opt/rh/gcc-toolset-${GCC_TOOLSET}/enable" >> $APPTAINER_ENVIRONMENT
+
+  # Set $PYVER to default Python, also make "python" and "pip" commands work
+  alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYVER} 1
+  alternatives --install /usr/bin/python python /usr/bin/python${PYVER} 1
+  alternatives --install /usr/bin/pip3 pip3 /usr/bin/pip${PYVER} 1
+  alternatives --install /usr/bin/pip pip /usr/bin/pip${PYVER} 1
+
+  # This is a hack to make sure that /usr/local/lib* paths are always
+  # included, even with PYTHONNOUSERSITE="TRUE" set
+  echo "/usr/local/lib/python${PYVER}/site-packages" > /usr/lib/python${PYVER}/site-packages/usr-local.pth
+  echo "/usr/local/lib64/python${PYVER}/site-packages" >> /usr/lib/python${PYVER}/site-packages/usr-local.pth
+  
+  pip install --upgrade pip
+  #############################################################################
+  # Needed python packages
+  #############################################################################
+  echo "requirements:"
+  cat /opt/requirements.txt
+  pip install -r /opt/requirements.txt
+  # Cleanup
+  #############################################################################
+  dnf clean all
+
+
+%environment
+  export LIBRARY_PATH=  # added 8.1.2025 as modules in host may set this which confuses compilations
