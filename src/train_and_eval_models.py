@@ -19,12 +19,12 @@ from scipy.stats import randint, uniform, loguniform, shapiro
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_absolute_error, mean_squared_error, root_mean_squared_error, make_scorer
+from sklearn.metrics import mean_absolute_error, mean_squared_error, root_mean_squared_error, make_scorer, r2_score
 from sklearn.dummy import DummyRegressor
 from math import sqrt
 from statistics import mean
 from create_synthetic_data import infer_num_and_bin_cols, make_synth_binary_data
-from safety_checks import min_freq
+from safety_checks import dominance, min_freq
 
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -215,39 +215,39 @@ def load_params(params_path):
 
 def load_data(args):
     df = pd.read_csv(args.data_path)
-    labels = df[args.label_col].copy()
-    labels = labels.astype('float32')
-    features = df.drop(columns=[args.label_col,'ID']).copy()
-    features = features.astype('float32')
+    labels = df[args.label_col].copy().astype('float32')
+    features = df.drop(columns=[args.label_col, 'ID']).copy().astype('float32')
+
     if args.test:
-        logging.info(f"Using synthetic data for testing")
+        logging.info("Using synthetic data for testing")
         num_cols, bin_cols, n_rows = infer_num_and_bin_cols(features)
-        features, labels = make_synth_binary_data(n_rows=1000,num_cols=num_cols,bin_cols=bin_cols)
-        logging.info(f"Created a dataset mimimicing original with numeric_cols={num_cols},bin_cols={bin_cols}, and n_rows={n_rows}")
-        
-    features_train, features_test, labels_train, labels_test = train_test_split(features, labels,random_state=SEED,test_size=0.25)
+        features, labels = make_synth_binary_data(n_rows=1000, num_cols=num_cols, bin_cols=bin_cols)
+        logging.info(f"Created a dataset mimicking original with numeric_cols={num_cols}, "
+                     f"bin_cols={bin_cols}, and n_rows={n_rows}")
+
+    features_train, features_test, labels_train, labels_test = train_test_split(
+        features, labels, random_state=SEED, test_size=0.25
+    )
     if not args.test:
         baseline_prediction = features_test['drg_day_expected'].copy()
         features_train = features_train.drop(columns=['drg_day_expected'])
         features_test = features_test.drop(columns=['drg_day_expected'])
     else:
-        baseline_prediction = np.full_like(labels_train,np.mean(labels_train))
+        baseline_prediction = np.full_like(labels_test, np.mean(labels_train))
 
+    n_boots = 1000
 
-    n_boots = 100
-    boot_test_sets = []
-    if args.do_final_preds:
-        for b in range(n_boots):
-            features_test_boot, labels_test_boot, preds_baseline_boot = resample(
-                features_test, labels_test,baseline_prediction,
-                replace=True,                 
-                n_samples=len(labels_test),      
-                random_state=SEED + b
-            )
-            boot_test_sets.append((features_test_boot, labels_test_boot,preds_baseline_boot))
-
-    #add full test set as last item of boots for point estimations
-    boot_test_sets.append((features_test,labels_test,baseline_prediction))
+    def boot_test_sets():
+        if args.do_final_preds:
+            for b in range(n_boots):
+                yield resample(
+                    features_test, labels_test, baseline_prediction,
+                    replace=True,
+                    n_samples=len(labels_test),
+                    random_state=SEED + b,
+                )
+        # last item: full test set for point estimation
+        yield features_test, labels_test, baseline_prediction
 
     return features_train, labels_train, boot_test_sets
 
@@ -455,7 +455,7 @@ def main():
             best_results = max(all_results, key=lambda d: d["best_score"])
             logging.info(f"Best model from all candidates is {best_results['model']}")
             logging.info(f"Best model parameters are {best_results['best_params']}")
-        save_params(best_results,args.best_params_path)
+            save_params(best_results,args.best_params_path)
     else:
         logging.info(f"Loading best estimator and params from {args.best_params_path}")
         best_results = load_params(args.best_params_path)
@@ -484,15 +484,19 @@ def main():
             "best_estimator_mae":[[],[]],
             "best_estimator_mse": [[],[]],
             "best_estimator_tailmae":[[],[]],
+            "best_estimator_r2score":[[],[]],
             "baseline_drg_expected_mae":[[],[]],
             "baseline_drg_expected_mse":[[],[]],
             "baseline_drg_expected_tailmae":[[],[]],
+            "baseline_drg_expected_r2score":[[],[]],
             'baseline_pred_mean_mae': [[],[]],
             'baseline_pred_mean_mse': [[],[]],
             'baseline_pred_mean_tailmae': [[],[]],
+            'baseline_pred_mean_r2score': [[],[]],
             'baseline_pred_median_mae': [[],[]],
             'baseline_pred_median_mse': [[],[]],
-            'baseline_pred_median_tailmae': [[],[]]
+            'baseline_pred_median_tailmae': [[],[]],
+            'baseline_pred_median_r2score': [[],[]]
         }
         sub_groups =  ["gender-0","gender-1","non-italian","italian","age-18-44","age-45-59","age-60-74","age-75-plus"]
         new_keys = []
@@ -505,9 +509,11 @@ def main():
 
 
 
-        for i,boot in enumerate(boot_test_sets):
-            if i == len(boot_test_sets) - 1:
-                logging.info(f"Calculating point estimate of test performance using full test set (last item of the boot list)")
+        last_idx = 1000 if args.do_final_preds else 0
+
+        for i, boot in enumerate(boot_test_sets()):
+            if i == last_idx:
+                logging.info("Calculating point estimate of test performance using full test set (last item of the boot iterator)")
                 index_to_append = 0
             else:
                 index_to_append = 1
@@ -518,19 +524,28 @@ def main():
             all_test_results['best_estimator_mae'][index_to_append].append(mean_absolute_error(labels_test_boot, labels_pred))
             all_test_results['best_estimator_mse'][index_to_append].append(mean_squared_error(labels_test_boot,labels_pred))
             all_test_results['best_estimator_tailmae'][index_to_append].append(tail_mae(labels_test_boot,labels_pred))
+            all_test_results['best_estimator_r2score'][index_to_append].append(r2_score(labels_test_boot,labels_pred))
+
             if not args.test:
                 all_test_results['baseline_drg_expected_mae'][index_to_append].append(mean_absolute_error(labels_test_boot, baseline_prediction))
                 all_test_results['baseline_drg_expected_mse'][index_to_append].append(mean_squared_error(labels_test_boot,baseline_prediction))
                 all_test_results['baseline_drg_expected_tailmae'][index_to_append].append(tail_mae(labels_test_boot,baseline_prediction))
+                all_test_results['baseline_drg_expected_r2score'][index_to_append].append(r2_score(labels_test_boot,baseline_prediction))
+
 
             y_pred_mean = mean_baseline.predict(features_test_boot)
             y_pred_median = median_baseline.predict(features_test_boot)
+
             all_test_results['baseline_pred_mean_mae'][index_to_append].append(mean_absolute_error(labels_test_boot, y_pred_mean))
             all_test_results['baseline_pred_mean_mse'][index_to_append].append(mean_squared_error(labels_test_boot,y_pred_mean))
             all_test_results['baseline_pred_mean_tailmae'][index_to_append].append(tail_mae(labels_test_boot,y_pred_mean))
+            all_test_results['baseline_pred_mean_r2score'][index_to_append].append(r2_score(labels_test_boot,y_pred_mean))
+
             all_test_results['baseline_pred_median_mae'][index_to_append].append(mean_absolute_error(labels_test_boot, y_pred_median))
             all_test_results['baseline_pred_median_mse'][index_to_append].append(mean_squared_error(labels_test_boot,y_pred_median))
             all_test_results['baseline_pred_median_tailmae'][index_to_append].append(tail_mae(labels_test_boot,y_pred_median))
+            all_test_results['baseline_pred_median_r2score'][index_to_append].append(r2_score(labels_test_boot,y_pred_median))
+
             for sub_m in sub_groups:
                 masking_func = masking_func_selector(sub_m)
                 mask = masking_func(features_test_boot)
@@ -547,19 +562,27 @@ def main():
                 all_test_results[f"best_estimator_mae-{sub_m}"][index_to_append].append(mean_absolute_error(y_true_sub,y_pred_sub))
                 all_test_results[f"best_estimator_mse-{sub_m}"][index_to_append].append(mean_squared_error(y_true_sub,y_pred_sub))
                 all_test_results[f"best_estimator_tailmae-{sub_m}"][index_to_append].append(tail_mae(y_true_sub,y_pred_sub))
+                all_test_results[f"best_estimator_r2score-{sub_m}"][index_to_append].append(r2_score(y_true_sub,y_pred_sub))
+
+
 
                 if not args.test:
                     all_test_results[f'baseline_drg_expected_mae-{sub_m}'][index_to_append].append(mean_absolute_error(y_true_sub, y_pred_baseline_drg_expected_sub))
                     all_test_results[f'baseline_drg_expected_mse-{sub_m}'][index_to_append].append(mean_squared_error(y_true_sub,y_pred_baseline_drg_expected_sub))
                     all_test_results[f'baseline_drg_expected_tailmae-{sub_m}'][index_to_append].append(tail_mae(y_true_sub,y_pred_baseline_drg_expected_sub))
-                
+                    all_test_results[f'baseline_drg_expected_r2score-{sub_m}'][index_to_append].append(r2_score(y_true_sub,y_pred_baseline_drg_expected_sub))
+
                 all_test_results[f'baseline_pred_mean_mae-{sub_m}'][index_to_append].append(mean_absolute_error(y_true_sub, y_pred_mean_sub))
                 all_test_results[f'baseline_pred_mean_mse-{sub_m}'][index_to_append].append(mean_squared_error(y_true_sub,y_pred_mean_sub))
                 all_test_results[f'baseline_pred_mean_tailmae-{sub_m}'][index_to_append].append(tail_mae(y_true_sub,y_pred_mean_sub))
+                all_test_results[f'baseline_pred_mean_r2score-{sub_m}'][index_to_append].append(r2_score(y_true_sub,y_pred_mean_sub))
+
 
                 all_test_results[f'baseline_pred_median_mae-{sub_m}'][index_to_append].append(mean_absolute_error(y_true_sub, y_pred_median_sub))
                 all_test_results[f'baseline_pred_median_mse-{sub_m}'][index_to_append].append(mean_squared_error(y_true_sub,y_pred_median_sub))
                 all_test_results[f'baseline_pred_median_tailmae-{sub_m}'][index_to_append].append(tail_mae(y_true_sub,y_pred_median_sub))
+                all_test_results[f'baseline_pred_median_r2score-{sub_m}'][index_to_append].append(r2_score(y_true_sub,y_pred_median_sub))
+
 
         logging.info("Done calculating test scores")
         results = {k: format_output_values(v) for k, v in all_test_results.items()}
