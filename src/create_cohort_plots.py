@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Plot estimator metrics per cohort as two accessible 2x2 figures:
+Plot estimator metrics per cohort as two accessible figures:
 
   1. <out>_gender_nationality : Male, Female | Italian, non-Italian
   2. <out>_age                : Age 18-44, 45-59, 60-74, 75+
 
-Reuses labels, style and TIFF export from plot_metrics_accessible.py,
-which must be in the same folder.
+Reuses labels, style, grid layout and TIFF export from
+create_performance_plot.py, which must be in the same folder.
 
 Input: the same JSON as before. Only keys whose metric part contains "-"
 are used here; text after the first "-" is the cohort name:
@@ -15,7 +15,8 @@ are used here; text after the first "-" is the cohort name:
    estimator = averaged_best_estimator, metric = mae, cohort = gender-0
 
 Layout (same in both figures, so they read the same way):
-- one panel per metric (MAE, MSE, RMSE, Tail MAE), each with its own y-axis
+- one panel per metric (MAE, MSE, RMSE, Tail MAE, R²), each with its own
+  y-axis; two panels per row, an odd last panel is centred
 - cohorts along the x-axis, estimators side by side within each cohort
 - each estimator has its own colour AND marker shape, so colour is never
   the only cue; one legend at the top is shared by all panels
@@ -23,12 +24,16 @@ Layout (same in both figures, so they read the same way):
   "Gender" and "Nationality" group labels under the x-axis
 - age groups are ordered: thin lines join each estimator's points to show
   the trend with age
-- vertical bars are confidence intervals; "↓" next to each panel title
-  means lower is better (explain this in the caption)
+- the R² axis starts at --r2_floor (default -0.2) so a very poor baseline
+  doesn't squeeze the 0-1 range; points/CI ends below it are drawn as "v" at
+  the axis bottom and labelled with their true value (the caption should say so)
+- vertical bars are confidence intervals; "↓" next to a panel title means
+  lower is better, "↑" (R²) means higher is better (explain in the caption)
 - each point's score is printed at 12 pt (the guide's 12-14 pt range),
   rotated to run vertically just above its own confidence bar: every label
   stays in its estimator's column, so labels never overlap each other
-- the exact numbers also go to a CSV; alt text goes to a .alt.txt file
+- each figure is saved as both PNG and TIFF; the exact numbers also go to
+  a CSV; alt text goes to a .alt.txt file
 """
 
 import argparse
@@ -42,8 +47,10 @@ from matplotlib.lines import Line2D
 
 from create_performance_plot import (
     METRIC_ORDER, METRIC_LABELS, METRIC_SPOKEN, ESTIMATOR_LABELS,
-    GRID_COLOUR, TEXT_COLOUR, ARROW, ARROW_SIZE,
-    setup_style, save_tiff, est_label, parse_key, fmt,
+    GRID_COLOUR, TEXT_COLOUR, ARROW_DOWN, ARROW_UP, ARROW_SIZE, NUMBER_WORDS,
+    setup_style, save_tiff, est_label, parse_key, fmt, make_grid,
+    higher_is_better, join_words, axis_floor, off_scale_sentence, OFF_SCALE_NOTE,
+    add_floor_args, apply_floor_args,
 )
 
 
@@ -158,41 +165,75 @@ def plot_cohort_figure(results, estimators, spec, name):
         return None, None
     cohorts = [c for _, keys in groups for c in keys]
     xs = np.array(x_positions(groups))
-    metrics = [m for m in METRIC_ORDER if m in results][:4]
+    metrics = [m for m in METRIC_ORDER if m in results]
 
     n_est = len(estimators)
     offsets = (np.linspace(-DODGE_WIDTH / 2, DODGE_WIDTH / 2, n_est)
                if n_est > 1 else np.zeros(1))
     styles = {e: SERIES_STYLES[i % len(SERIES_STYLES)] for i, e in enumerate(estimators)}
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharex=True)
-    axes = axes.ravel()
+    ncols = 2
+    nrows = int(np.ceil(len(metrics) / ncols))
+    fig = plt.figure(figsize=(12, 4.6 * nrows))
+    axes = make_grid(fig, len(metrics), ncols=ncols)
 
+    clipped = {}
     for ax, metric in zip(axes, metrics):
+        # Same number of decimals for every value label in this panel
+        ref = max((abs(v[0]) for c in cohorts for v in results[metric].get(c, {}).values()),
+                  default=0.0)
+        all_lows = [min(v[0], v[1]) for c in cohorts
+                    for v in results[metric].get(c, {}).values()]
+        floor = axis_floor(metric, all_lows)
+        if floor is not None:
+            clipped[metric] = floor
+            # labels share decimals with the in-range values only
+            in_range = [abs(v[0]) for c in cohorts
+                        for v in results[metric].get(c, {}).values() if v[0] >= floor]
+            ref = max(in_range, default=None)
+        f = -np.inf if floor is None else floor
+
         for j, est in enumerate(estimators):
             vals = [results[metric].get(c, {}).get(est, (np.nan,) * 3) for c in cohorts]
             s = np.array([v[0] for v in vals])
-            lo = np.array([v[0] - v[1] for v in vals]).clip(min=0)
-            hi = np.array([v[2] - v[0] for v in vals]).clip(min=0)
+            lo = np.minimum(np.array([v[1] for v in vals]), s)
+            hi = np.maximum(np.array([v[2] for v in vals]), s)
+            s_d, lo_d, hi_d = np.maximum(s, f), np.maximum(lo, f), np.maximum(hi, f)
+            on = ~np.isnan(s) & (s >= f)
+            off = ~np.isnan(s) & (s < f)
+            x = xs + offsets[j]
             st = styles[est]
-            ax.errorbar(
-                xs + offsets[j], s, yerr=[lo, hi],
-                fmt=st["marker"], ms=MARKER_SIZE, color=st["color"],
-                ecolor=st["color"], elinewidth=1.4, capsize=3, capthick=1.4,
-                linestyle="-" if spec["connect"] else "none", linewidth=1.0,
-                zorder=3,
-            )
+            c = st["color"]
+            # CIs drawn by hand so a clipped end gets a "v" instead of a cap
+            ok = ~np.isnan(s)
+            ax.vlines(x[ok], lo_d[ok], hi_d[ok], color=c, lw=1.4, zorder=2)
+            cap = dict(marker="_", ms=6, mew=1.4, color=c, linestyle="none", zorder=2)
+            ax.plot(x[ok & (hi >= f)], hi_d[ok & (hi >= f)], **cap)
+            ax.plot(x[ok & (lo >= f)], lo_d[ok & (lo >= f)], **cap)
+            ax.plot(x[on & (lo < f)], np.full((on & (lo < f)).sum(), f), "v",
+                    ms=5, color=c, mec="none", zorder=3)
+            # Points; off-scale points become a "v" at the floor. The connecting
+            # line (age figure) is broken at off-scale points.
+            ax.plot(x, np.where(on, s, np.nan), marker=st["marker"],
+                    ms=MARKER_SIZE, color=c, zorder=3,
+                    linestyle="-" if spec["connect"] else "none", linewidth=1.0)
+            if off.any():
+                ax.plot(x[off], np.full(off.sum(), f), "v", ms=MARKER_SIZE + 3,
+                        color=c, mec="none", zorder=3)
             if SHOW_VALUES:
-                for x, sv, h in zip(xs + offsets[j], s, hi):
+                for xv, sv, top in zip(x, s, hi_d):
                     if np.isnan(sv):
                         continue
                     ax.annotate(
-                        fmt(sv), (x, sv + h), xytext=(0, 3), textcoords="offset points",
+                        fmt(sv, ref), (xv, top), xytext=(0, 3), textcoords="offset points",
                         rotation=90, ha="center", va="bottom",
                         fontsize=VALUE_FONTSIZE, color=TEXT_COLOUR, zorder=4,
                         bbox=dict(boxstyle="square,pad=0.05", fc="white", ec="none"),
                     )
         ax.margins(y=0.06)
+        if floor is not None:
+            y0, y1 = ax.get_ylim()
+            ax.set_ylim(f - 0.04 * (y1 - f), y1)
 
         ax.set_title(METRIC_LABELS.get(metric, metric), loc="left")
         ax.grid(True, axis="y", color=GRID_COLOUR, linestyle="--", linewidth=0.6)
@@ -204,14 +245,11 @@ def plot_cohort_figure(results, estimators, spec, name):
         for b in bounds:
             ax.axvline((xs[b - 1] + xs[b]) / 2, color=GRID_COLOUR, linewidth=0.8)
 
-    for ax in axes[len(metrics):]:
-        ax.set_visible(False)
-
-    axes[0].set_xticks(xs)
-    axes[0].set_xticklabels([COHORT_NAMES[c] for c in cohorts])
-    axes[0].set_xlim(xs[0] - 0.6, xs[-1] + 0.6)
-    for ax in axes[2:4]:
-        ax.tick_params(axis="x", labelbottom=True)
+        # Every panel gets its own cohort labels: with a centred last panel
+        # there is no single "bottom row" to carry them.
+        ax.set_xticks(xs)
+        ax.set_xticklabels([COHORT_NAMES[c] for c in cohorts])
+        ax.set_xlim(xs[0] - 0.6, xs[-1] + 0.6)
 
     handles = [
         Line2D([], [], color=styles[e]["color"], marker=styles[e]["marker"],
@@ -224,15 +262,20 @@ def plot_cohort_figure(results, estimators, spec, name):
                columnspacing=1.6)
 
     has_group_labels = any(label for label, _ in groups)
-    fig.tight_layout(rect=(0, 0.04 if has_group_labels else 0, 1, 0.94),
-                     h_pad=2.5, w_pad=3.0)
+    legend_frac = 0.5 / fig.get_figheight()          # ~0.5 in for the legend
+    fig.tight_layout(rect=(0, 0, 1, 1 - legend_frac),
+                     h_pad=4.0 if has_group_labels else 2.5, w_pad=3.0)
     if SHOW_VALUES:
-        fit_value_labels(fig, axes[:len(metrics)])
+        fit_value_labels(fig, axes)
     if has_group_labels:
-        add_group_labels(fig, axes[2:4], groups, xs)
-    add_title_arrows(fig, axes[:len(metrics)])
+        add_group_labels(fig, axes, groups, xs)
+    add_title_arrows(fig, axes, metrics)
 
     alt = make_alt_text(results, estimators, metrics, cohorts, spec)
+    for m, fl in clipped.items():
+        alt += " " + off_scale_sentence(m, fl)
+        print(f"Caption note ({name}): " + OFF_SCALE_NOTE.format(
+            metric=METRIC_LABELS.get(m, m), floor=f"{fl:g}".replace("-", "\u2212")))
     return fig, alt
 
 
@@ -277,21 +320,27 @@ def add_group_labels(fig, axes, groups, xs):
                      color=TEXT_COLOUR)
 
 
-def add_title_arrows(fig, axes):
-    """Separately sized '↓' right after each panel title (lower is better)."""
+def add_title_arrows(fig, axes, metrics):
+    """Separately sized arrow right after each panel title:
+    '↓' lower is better, '↑' higher is better (R²)."""
     fig.canvas.draw()
     r = fig.canvas.get_renderer()
-    for ax in axes:
+    for ax, metric in zip(axes, metrics):
+        arrow = ARROW_UP if higher_is_better(metric) else ARROW_DOWN
         bb = ax._left_title.get_window_extent(r)
         x, y = fig.transFigure.inverted().transform((bb.x1, (bb.y0 + bb.y1) / 2))
-        fig.text(x, y, " " + ARROW, fontsize=ARROW_SIZE, ha="left", va="center",
+        fig.text(x, y, " " + arrow, fontsize=ARROW_SIZE, ha="left", va="center",
                  color=TEXT_COLOUR)
 
 
 def make_alt_text(results, estimators, metrics, cohorts, spec):
-    names = ", ".join(METRIC_SPOKEN.get(m, m) for m in metrics)
-    parts = [f"Four-panel plot of {names} for {len(estimators)} estimators "
+    names = join_words([METRIC_SPOKEN.get(m, m) for m in metrics])
+    count = NUMBER_WORDS.get(len(metrics), str(len(metrics)))
+    parts = [f"{count}-panel plot of {names} for {len(estimators)} estimators "
              f"across {spec['spoken']}, with confidence intervals."]
+
+    def word(m):
+        return "highest" if higher_is_better(m) else "lowest"
 
     # Who is best in each metric/cohort cell
     best = {}
@@ -299,21 +348,23 @@ def make_alt_text(results, estimators, metrics, cohorts, spec):
         for c in cohorts:
             cell = results[m].get(c, {})
             if cell:
-                best[(m, c)] = min(cell, key=lambda e: cell[e][0])
+                pick = max if higher_is_better(m) else min
+                best[(m, c)] = pick(cell, key=lambda e: cell[e][0])
     winners = set(best.values())
     if len(winners) == 1:
-        parts.append(f"{est_label(winners.pop())} has the lowest error in every "
+        parts.append(f"{est_label(winners.pop())} has the best score in every "
                      f"cohort for every metric.")
     else:
         for m in metrics:
             ws = {best[(m, c)] for c in cohorts if (m, c) in best}
             if len(ws) == 1:
-                parts.append(f"{est_label(next(iter(ws)))} has the lowest "
+                parts.append(f"{est_label(next(iter(ws)))} has the {word(m)} "
                              f"{METRIC_SPOKEN.get(m, m)} in every cohort.")
             else:
                 cells = "; ".join(f"{COHORT_NAMES[c]}: {est_label(best[(m, c)])}"
                                   for c in cohorts if (m, c) in best)
-                parts.append(f"Lowest {METRIC_SPOKEN.get(m, m)} by cohort: {cells}.")
+                parts.append(f"{word(m).capitalize()} {METRIC_SPOKEN.get(m, m)} "
+                             f"by cohort: {cells}.")
 
     # Spread across cohorts for the first estimator, on the first metric
     if metrics and estimators:
@@ -350,38 +401,41 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_path", required=True, help="Path to JSON with metric results.")
     ap.add_argument("--out", default=None,
-                    help="Output prefix, e.g. figs/cohorts.png -> figs/cohorts_age.png etc. "
-                         "Default: <data file>_cohorts next to the data file.")
+                    help="Output prefix, e.g. figs/cohorts -> figs/cohorts_age.png and "
+                         "figs/cohorts_age.tiff etc. Default: <data file>_cohorts next "
+                         "to the data file.")
+    ap.add_argument("--png_dpi", type=int, default=300, help="PNG resolution (default: 300).")
     ap.add_argument("--tiff_dpi", type=int, default=600, help="TIFF resolution (default: 600).")
-    ap.add_argument("--no_tiff", action="store_true", help="Do not write TIFFs.")
     ap.add_argument("--show", action="store_true", help="Also open the figures in a window.")
+    add_floor_args(ap)
     args = ap.parse_args()
+    apply_floor_args(args)
 
     if args.out:
         base = Path(args.out)
-        ext = base.suffix or ".png"
-        base = base.with_suffix("")
+        if base.suffix.lower() in (".png", ".tif", ".tiff"):
+            base = base.with_suffix("")
     else:
         d = Path(args.data_path)
-        base, ext = d.with_name(d.stem + "_cohorts"), ".png"
+        base = d.with_name(d.stem + "_cohorts")
     base.parent.mkdir(parents=True, exist_ok=True)
 
     setup_style()
     results, estimators = load_cohort_results(args.data_path)
     if not results:
         raise SystemExit("No cohort entries (metric names with '-') found.")
-    metrics = [m for m in METRIC_ORDER if m in results][:4]
+    metrics = [m for m in METRIC_ORDER if m in results]
 
     for name, spec in FIGURES.items():
         fig, alt = plot_cohort_figure(results, estimators, spec, name)
         if fig is None:
             continue
         stem = base.with_name(f"{base.name}_{name}")
-        png = stem.with_suffix(ext)
-        fig.savefig(png, dpi=300, bbox_inches="tight", facecolor="white")
-        print(f"Saved figure to {png}")
-        if not args.no_tiff:
-            save_tiff(fig, stem.with_suffix(".tiff"), dpi=args.tiff_dpi)
+        png = stem.with_name(stem.name + ".png")
+        fig.savefig(png, format="png", dpi=args.png_dpi, bbox_inches="tight",
+                    facecolor="white")
+        print(f"Saved PNG to {png} ({args.png_dpi} dpi)")
+        save_tiff(fig, stem.with_name(stem.name + ".tiff"), dpi=args.tiff_dpi)
         stem.with_suffix(".alt.txt").write_text(alt + "\n", encoding="utf-8")
         cohorts = [c for _, k in resolve_cohorts(spec["groups"], results) for c in k]
         write_csv(stem.with_suffix(".csv"), results, estimators, metrics, cohorts)
