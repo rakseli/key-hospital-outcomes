@@ -78,7 +78,7 @@ def main():
     X_test_trans = X_test_trans.rename(columns=cols_to_rename)
     X_train_trans.columns = X_train_trans.columns.str.replace(r"ICD9(?!-CM)|ICD(?!9)", "ICD9-CM", regex=True)
     X_test_trans.columns = X_test_trans.columns.str.replace(r"ICD9(?!-CM)|ICD(?!9)", "ICD9-CM", regex=True)
-
+    assert X_train_trans.columns.is_unique
     if args.tree_mode:
         plot_prefix = "tree_dependent_"
         explainer = shap.TreeExplainer(model,feature_perturbation="tree_path_dependent",model_output="raw")
