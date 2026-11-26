@@ -2,15 +2,16 @@
 """
 Turn the full-cohort metrics (keys WITHOUT "-") into a Word table (.docx).
 
-Uses the same JSON and the same labels as plot_metrics_accessible.py, which
+Uses the same JSON and the same labels as create_performance_plot.py, which
 must be in the same folder. Needs python-docx:  pip install python-docx
 
 Table layout:
 - one row per estimator, sorted by MAE (lowest first)
-- one column per metric: MAE, MSE, RMSE, Tail MAE
+- one column per metric: MAE, MSE, RMSE, Tail MAE, R²
 - each cell: score, with (CI low–CI high) on the line below;
   --ci_same_line puts both on one line (use with --landscape)
-- the lowest score in each column is bold, its CI is not (--no_bold to turn off)
+- the best score in each column is bold, its CI is not (--no_bold to turn off);
+  best = lowest for error metrics, highest for R²
 
 Accessibility (Word):
 - simple grid: no merged or empty cells, one header row
@@ -36,6 +37,7 @@ from docx.shared import Inches, Pt
 
 from create_performance_plot import (
     METRIC_ORDER, METRIC_LABELS, METRIC_SPOKEN, load_results, est_label,
+    higher_is_better, winner_sentences,
 )
 
 FONT = "Arial"
@@ -117,8 +119,15 @@ def write_cell(cell, text, bold=False, align=WD_ALIGN_PARAGRAPH.CENTER):
 # --------------------------------------------------------------------------
 # Table
 # --------------------------------------------------------------------------
-def _join(items):
-    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+MINUS = "\u2212"           # true minus sign, so "−0.06–−0.04" stays readable
+
+
+def num(x, decimals):
+    """Fixed-decimal number with a true minus sign and no "-0.00"."""
+    out = f"{x:.{decimals}f}"
+    if float(out) == 0:
+        out = out.lstrip("-")
+    return out.replace("-", MINUS)
 
 
 def build_table(doc, results, estimators, decimals=3, bold_best=True,
@@ -130,7 +139,9 @@ def build_table(doc, results, estimators, decimals=3, bold_best=True,
         estimators = sorted(estimators,
                             key=lambda e: (results["mae"].get(e, (float("inf"),))[0], e))
 
-    best = {m: min(results[m], key=lambda e: results[m][e][0]) for m in metrics}
+    pick = {True: max, False: min}
+    best = {m: pick[higher_is_better(m)](results[m], key=lambda e: results[m][e][0])
+            for m in metrics}
 
     if title:
         cap = doc.add_paragraph(title)
@@ -157,8 +168,8 @@ def build_table(doc, results, estimators, decimals=3, bold_best=True,
             if est in results[m]:
                 s, lo, hi = results[m][est]
                 is_best = bold_best and best[m] == est
-                text = [(f"{s:.{decimals}f}", is_best),
-                        (f"{sep}({lo:.{decimals}f}{EN_DASH}{hi:.{decimals}f})", False)]
+                text = [(num(s, decimals), is_best),
+                        (f"{sep}({num(lo, decimals)}{EN_DASH}{num(hi, decimals)})", False)]
             else:
                 text = "n/a"               # never leave a cell empty
             write_cell(row.cells[j], text)
@@ -169,13 +180,10 @@ def build_table(doc, results, estimators, decimals=3, bold_best=True,
     set_col_widths(table, [first] + [other] * len(metrics))
     set_table_borders(table)
 
-    winners = {}
-    for m in metrics:
-        winners.setdefault(est_label(best[m]), []).append(METRIC_SPOKEN.get(m, m))
     desc = (f"Table of {', '.join(METRIC_SPOKEN.get(m, m) for m in metrics)} for "
             f"{len(estimators)} estimators on the full cohort, each with its "
             f"confidence interval. "
-            + " ".join(f"{e} has the lowest {_join(ms)}." for e, ms in winners.items()))
+            + " ".join(winner_sentences(metrics, {m: est_label(best[m]) for m in metrics})))
     set_alt_text(table, title or "Model performance on the full cohort", desc)
 
     if note:
@@ -190,8 +198,8 @@ def main():
     ap.add_argument("--data_path", required=True, help="Path to JSON with metric results.")
     ap.add_argument("--out", default=None,
                     help="Output .docx (default: <data file>_table.docx).")
-    ap.add_argument("--decimals", type=int, default=2, help="Decimal places (default: 3).")
-    ap.add_argument("--no_bold", action="store_true", help="Don't bold the lowest score per metric.")
+    ap.add_argument("--decimals", type=int, default=2, help="Decimal places (default: 2).")
+    ap.add_argument("--no_bold", action="store_true", help="Don't bold the best score per metric.")
     ap.add_argument("--ci_same_line", action="store_true",
                     help="Put score and CI on one line (best with --landscape).")
     ap.add_argument("--landscape", action="store_true", help="Landscape page.")
