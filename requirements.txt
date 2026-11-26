@@ -17,3 +17,4 @@ shap==0.52.0
 statsmodels==0.15.0
 tqdm==4.70.0
 xgboost==3.4.1
+python-docxeux
