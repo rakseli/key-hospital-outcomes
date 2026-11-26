@@ -46,9 +46,10 @@ def main():
         N_BACKGROUND=5000
     acronyms = ["ARP", "DRG", "ICD","ICD9","ID"]
     cols_to_rename ={
-        "N ICD Diag":"N ICD Diagnoses",
+        "N ICD Diag":"N ICD9 Diagnoses",
         "N Nursing Diag":"N Nursing Diagnoses",
-        "N Procs": "N Processes",
+        "N Procs": "N Medical Procedures",
+        "ARP Weight": "APR-DRG Weight",
         "Residence Dimissione A Domicilio Del Paziente Con Attivazion":"Patient discharge home with activation of home care",
         "Residence Decesso":"Discharge: Dead",
         "Residence Domicilio":"Discharge: Home",
@@ -75,6 +76,8 @@ def main():
     X_test_trans.columns = cols.str.replace(pattern, lambda m: m.group(1).upper(), regex=True)
     X_train_trans = X_train_trans.rename(columns=cols_to_rename)
     X_test_trans = X_test_trans.rename(columns=cols_to_rename)
+    X_train_trans.columns = X_train_trans.columns.str.replace(r"ICD9(?!-CM)|ICD(?!9)", "ICD9-CM", regex=True)
+    X_test_trans.columns = X_test_trans.columns.str.replace(r"ICD9(?!-CM)|ICD(?!9)", "ICD9-CM", regex=True)
 
     if args.tree_mode:
         plot_prefix = "tree_dependent_"
@@ -107,9 +110,11 @@ def main():
     #safety checks
     for col in names:
         #we skip these as we assume attacker does not have access to hospital system
-        if col in ['ARP Weight',"DRG Weight"]:
+        if col in ['APR-DRG Weight',"DRG Weight"]:
             continue
+
         counts = X_test_trans[col].value_counts()
+        print(counts)
         failing = counts[counts <= 10]
         if not failing.empty:
             print(f"{col}: {len(failing)} values with ≤10 rows")
@@ -135,7 +140,7 @@ def main():
     save_shap(lambda **k: shap.plots.heatmap(explanation,**k), f"../results/{plot_prefix}shap_heatmap.png")
     log, supp = shap_beeswarm_binned(explanation, f"../results/{plot_prefix}shap_beeswarm_binned.png")
     print(log)
-    for feat in ["DRG Weight","N Processes","N ICD Diagnoses","N Nursing Diagnoses","Admission Type"]:
+    for feat in ["DRG Weight","N Medical Procedures","N ICD9-CM Diagnoses","N Nursing Diagnoses","Admission Type"]:
         print(f"Plotting feature: {feat}")
         save_shap(lambda **k:shap.plots.scatter(explanation[:, feat]),f"../results/{plot_prefix}scatter_{feat}.png")
         if feat == "N Nursing Diagnoses":
@@ -150,7 +155,7 @@ def main():
         save_shap(lambda **k:shap.decision_plot(base_value=explanation.base_values[0],shap_values=explanation.values[0], feature_order="importance", link="identity",features=X_test_trans.iloc[0,:]),f"../results/{plot_prefix}decision_single_decision_plot.png")
         save_shap(lambda **k:shap.decision_plot(base_value=np.mean(explanation.base_values[:10]),shap_values=explanation.values[:10],feature_order="importance", link="identity",features=X_test_trans.iloc[:10,:]),f"../results/{plot_prefix}decision_multiple_decisions_plot.png")
     
-    for feat in ["ARP Weight","DRG Weight","N Processes","N ICD Diagnoses","N Nursing Diagnoses"]:
+    for feat in ["APR-DRG Weight","DRG Weight","N Medical Procedures","N ICD9-CM Diagnoses","N Nursing Diagnoses"]:
         info = shap_hexbin(explanation, feat, f"../results/{plot_prefix}{feat}_hexabin.png")
         print(info)
 if __name__ == "__main__":
